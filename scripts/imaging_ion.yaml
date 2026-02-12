@@ -1,0 +1,20 @@
+#beam settings
+plasma: True
+plasma_source: Xenon
+beam_current: 10.0e-12
+voltage: 30000.0
+working_distance: 16.50e-3
+scan_rotation: 0
+beam_type: ion
+
+#imaging settings
+dwell_time: 1000.0e-9
+hfw: 80.0e-6
+resolution: [1536, 1024]
+autocontrast: False
+autogamma: False
+drift_correction: False
+frame_integration: 1
+line_integration: 1
+reduced_area: null
+save: True
