@@ -1,0 +1,18 @@
+#beam settings
+beam_current: 25.0e-12
+voltage: 2000.0
+working_distance: 4.0e-3
+scan_rotation: 180
+beam_type: electron
+
+#imaging settings
+dwell_time: 100.0e-09
+hfw: 600.0e-6
+resolution: [1536, 1024]
+autocontrast: False
+autogamma: False
+drift_correction: False
+frame_integration: 1
+line_integration: 1
+reduced_area: null
+save: True
