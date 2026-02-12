@@ -72,7 +72,7 @@ class BasicFunctions:
         self.pc_type = platform.system()
         if self.tool == 'Helios 5 Hydra UX':
             self.tool = 'Hydra'
-        # with open(os.path.join(self.project_root, 'modules_czii', f"czii-stored-stage-positions_{self.tool.lower()}.yaml"), "r") as file:
+        # with open(os.path.join(self.project_root, 'scripts', f"czii-stored-stage-positions_{self.tool.lower()}.yaml"), "r") as file:
         #     self.saved_stage_positions = yaml.safe_load(file)
         self.default_settings = default_settings
         self.fib_microscope, self.fib_settings = self.connect_to_microscope()
@@ -215,7 +215,7 @@ class BasicFunctions:
 
 
         if looks_like_path(file) is False:
-            path = os.path.join(self.project_root, file + '.yaml')
+            path = os.path.join(self.project_root, 'scripts', file + '.yaml')
         else:
             path = file
 
