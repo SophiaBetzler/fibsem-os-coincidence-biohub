@@ -44,10 +44,7 @@ class CoincidenceFunctions:
         if self.oa.tool != 'Arctis':
             raise RuntimeError("This is not the right tool to run the automated tricoincidence routine.")
         self.imaging = Imaging(self.oa)
-        self.position_data = []
-        self.data_file = os.path.join(self.oa.folder_path, 'position_data.json')
         self.hfw = 120.0e-6
-        self.auto_gis = GisSputterAutomation(self.oa)
         self.lock  = threading.Lock()
         self.coin_stop_event = threading.Event()
         self.pause_not_stop = False
@@ -234,16 +231,13 @@ class CoincidenceFunctions:
             print('[INFO] Milling stopped!')
 
 
-    def run_coincidence_experiment(self, callback, stop_event, start_timestamp=0.0,
-                                   test=False, row=None, beam_current=None):
+    def run_coincidence_experiment(self, callback, stop_event, start_timestamp=0.0, test=False, row=None, beam_current=None):
 
         def wait_and_finalize_imaging_thread():
             self.imaging_thread.join()
             print("[INFO] Fluorescence experiment stopped.")
             self.stop_coincidence_milling()
             print("[INFO] Milling stopped")
-
-        
 
         now = datetime.now()
         if not hasattr(self, "manual_folder_path"):
