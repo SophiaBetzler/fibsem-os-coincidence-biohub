@@ -1,439 +1,386 @@
-import subprocess
-import os
-from pathlib import Path
-from datetime import datetime
-from fibsem import utils, structures, microscope
-from tkinter import messagebox
 import sys
-import ast
-import yaml
-import socket
-import numpy as np
-from aicsimageio import AICSImage
-import xml.etree.ElementTree as ET
-from PIL import Image
-from PIL.TiffTags import TAGS
-from dataclasses import dataclass
-import json
-import tifffile
+import time
+import copy
+import queue
 import platform
+import json
+import os
 import threading
-### HERE THE CORRECT PATH TO AUTOSCRIPT CLIENT MUST BE ADDED
-sys.path.append("C:\\Program Files\\Thermo Scientific AutoScript")
-sys.path.append("C:\\Program Files\\Enthought\\Python\\envs\\AutoScript\\Lib\\site-packages")
-sys.path.append("C:\\Program Files\\Enthought\\Python\\envs\\AutoScript")
-sys.path.append("C:\\Program Files\\Enthought\\Python\envs\\AutoScript\\Lib\\site-packages\\autoscript_sdb_microscope_client")
-from autoscript_sdb_microscope_client import SdbMicroscopeClient
+import statistics
+from datetime import datetime, date
+from pathlib import Path
+from collections import namedtuple, deque
+from concurrent.futures import ThreadPoolExecutor
+import re
 
-def error_message(text):
-    messagebox.showerror("Error", text)
+import tifffile
+import cv2
+import numpy as np
 
-
-def create_temp_folder(predefined_path=None):
-    """
-    This script creates a folder with the current date on the desktop. Inside a temp folder to
-    temporarily store data.
-    """
-    if predefined_path is None:
-        current_date = datetime.now().strftime("%Y%m%d")
-        desktop_path = Path.home() / "Desktop/"
-        folder_path = os.path.join(desktop_path, 'Experiment_Images/', current_date)
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-    else:
-        folder_path = predefined_path
-    if not os.path.exists(os.path.join(folder_path + '/Temp')):
-        os.makedirs(folder_path + '/Temp')
-    return os.path.join(folder_path, 'Temp'), folder_path
-
-class BasicFunctions:
-    """
-    This class summarizes the basic functions needed as foundation for many other modules.
-    It includes the read-in of the textfiles, allows to execute scripts from another
-    virtual environment, connects to the microscope.
-    """
-
-    def __init__(self, default_settings=False):
-        create_temp_folder()
-        self.project_root = Path(__file__).resolve().parent.parent
-        self.python_root = Path(__file__).resolve().parent.parent.parent.parent
-        self.temp_folder_path, self.folder_path = create_temp_folder()
-        try:
-            self.thermo_microscope = SdbMicroscopeClient()
-            self.thermo_microscope.connect()
-            self.tool = self.thermo_microscope.service.system.name
-            self.manufacturer = 'Thermo'
-        except:
-            print('Autoscript connection not successful.')
-            self.manufacturer = 'Demo'
-            self.thermo_microscope = None
-            self.tool = 'Arctis'
-        self.pc_type = platform.system()
-        if self.tool == 'Helios 5 Hydra UX':
-            self.tool = 'Hydra'
-        with open(os.path.join(self.project_root, 'modules_czii', f"czii-stored-stage-positions_{self.tool.lower()}.yaml"), "r") as file:
-            self.saved_stage_positions = yaml.safe_load(file)
-        self.default_settings = default_settings
-        self.fib_microscope, self.fib_settings = self.connect_to_microscope()
+pc_type = platform.system()
+import matplotlib
+if pc_type == 'Windows':
+    matplotlib.use('Qt5Agg')
+elif pc_type == 'Darwin':
+    matplotlib.use('Qt5Agg')
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 
 
-    def socket_communication(self, target_pc, function, args, role=None):
-        if target_pc == 'Meteor_PC':
-            SERVER_IP = '10.50.2.119'
-            PORT = 23924
-            if role is None:
-                role = 'server'
-        elif target_pc == 'Microscope_PC_Hydra':
-            SERVER_IP = ''
-            PORT = ''
-            if role is None:
-                role = 'client'
-        elif target_pc == 'Support_PC_Hydra':
-            SERVER_IP = ''
-            PORT = ''
-            if role is None:
-                role = 'client'
+sys.path.append('C:\Program Files\Thermo Scientific Autoscript')
+sys.path.append('C:\Program Files\Enthought\Python\envs\AutoScript\Lib\site-packages')
+
+# from autoscript_sdb_microscope_client import SdbMicroscopeClient
+# from autoscript_sdb_microscope_client.enumerations import *
+# from autoscript_sdb_microscope_client.structures import GetImageSettings
+# from autoscript_sdb_microscope_client import SdbMicroscopeClient
+
+
+
+class CoincidenceFunctions:
+    def __init__(self, oa, mode, on_experiment_stopped=None):
+        self.results = None
+        self.oa = oa
+        if self.oa.tool != 'Arctis':
+            raise RuntimeError("This is not the right tool to run the automated tricoincidence routine.")
+        self.imaging = Imaging(self.oa)
+        self.mode = mode
+        self.position_data = []
+        self.data_file = os.path.join(self.oa.folder_path, 'position_data.json')
+        self.hfw = 120.0e-6
+        self.auto_gis = GisSputterAutomation(self.oa)
+        self.lock  = threading.Lock()
+        self.coin_stop_event = threading.Event()
+        self.pause_not_stop = False
+        self.data_callback = None
+        self.on_experiment_stopped = on_experiment_stopped
+
+
+#######################################################################################################################
+#####       Functions controlling the Arctis
+#######################################################################################################################
+
+    def grab_fl_live_image(self, save=True):
+        if self.oa.manufacturer != 'Demo':
+            
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+
+            image = self.oa.thermo_microscope.imaging.get_image()
+            if save is True:
+                image.save(os.path.join(self.oa.temp_folder_path, f"fl_image.tif"))
+            img = image.data
         else:
-            print('Please specify the target PC.')
-            return
-        command = f"{function} {args}"
-        if role == 'client':
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect((SERVER_IP, PORT))
-                s.sendall(command.encode("utf-8"))
+            sim = self.fl_data_simulation()
+            image = sim()
+            if save is True:
+                tifffile.imwrite(os.path.join(self.oa.temp_folder_path, f"fl_image.tif"), image)
+            img = image
+        print("[INFO] Acquiring live fluorescence image.")
+        return img
 
-                size = int.from_bytes(s.recv(8), 'big')
-                data = b""
-                while len(data) < size:
-                    chunk = s.recv(min(4096, size - len(data)))
-                    if not chunk:
-                        break
-                    data += chunk
-                    import pickle
-                    return pickle.loads(data)
-        elif role == 'server':
-            def handle_client(conn, addr):
-                print(f"[SERVER] Connection from {addr}")
-                try:
-                    command_str = conn.recv(1024).decode("utf-8")
-                    print(f"[SERVER] Received command: {command_str}")
-                    func_name, *arg_str = command_str.strip().split(maxsplit=1)
-                    parsed_args = eval(arg_str[0]) if arg_str else {}
-
-                    if hasattr(self, func_name):
-                        method = getattr(self, func_name)
-                        result = method(parsed_args) if parsed_args else method()
-                    else:
-                        result = f"[ERROR] Unknown function '{func_name}'"
-                except Exception as e:
-                    result = f"[EXCEPTION] {e}"
-
-                data = pickle.dumps(result)
-                conn.send(len(data).to_bytes(8, 'big'))
-                conn.sendall(data)
-                conn.close()
-                print("[SERVER] Connection closed.")
-
-            def start_server():
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind((SERVER_IP, PORT))
-                    s.listen()
-                    print(f"[SERVER] Listening on {SERVER_IP}:{PORT}...")
-                    while True:
-                        conn, addr = s.accept()
-                        thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-                        thread.start()
-
-            # Start server loop in a background thread if needed
-            server_thread = threading.Thread(target=start_server, daemon=True)
-            server_thread.start()
-            print("[SERVER] Server started.")
-        else:
-            raise ValueError(f"Invalid role: {role}")
-
-    def execute_external_script(self, script, dir_name, parameter=None):
-        """
-        This function executes a 'script.py' function from a different directory.
-        script: script name as str
-        dir_name: dir_name as str
-        parameter: additional parameters needed by the script as str or list of str
-        """
-        if self.pc_type == 'Darwin':
-            python_path = os.path.join(self.python_root, dir_name, 'venv/bin/python')
-        elif self.pc_type == 'Windows':
-            python_path = os.path.join(self.python_root, dir_name, 'venv\\Scripts\\python')
-
-        script_path = os.path.join(self.python_root, dir_name, script)
-
-        cmd = [python_path, script_path, '--temp_folder_path', self.temp_folder_path]
-
-        if parameter:
-            cmd += ['--parameter'] + parameter
-        print("Running command:", " ".join(cmd))
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        return result
-
-    def connect_to_microscope(self):
-        """
-        Establish connection to the microscope.
-        manufacturer: 'Demo', 'Thermo', 'Tescan'
-        ip: 'localhost', '192.168.0.1' using the default IP for Thermo at the moment.
-        tool: 'Hydra', 'Arctis'
-        """
-        if self.tool == 'Hydra':
-            config_path = os.path.join(self.project_root, 'config', 'czii-tfs-hydra-configuration.yaml')
-        elif self.tool == 'Arctis':
-            config_path = os.path.join(self.project_root, 'config', 'tfs-arctis-configuration.yaml')
-        else:
-            raise ValueError("No valid tool selected. Options are Hydra and Arctis")
-
-        try:
-            if self.default_settings is False:
-                fib_microscope, fib_settings = utils.setup_session(manufacturer=self.manufacturer,
-                                                                   config_path=config_path)
+    def grab_reflection_image(self, row=None):
+        if self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            self.oa.thermo_microscope.detector.camera_settings.filter.type.value = CameraFilterType.REFLECTION
+            self.oa.thermo_microscope.detector.brightness.value = 0.01
+            self.oa.thermo_microscope.detector.camera_settings.binning.value = 4
+            self.oa.thermo_microscope.detector.camera_settings.exposure_time.value = 0.001
+            emission_color = self.oa.thermo_microscope.detector.camera_settings.emission.type.value
+            self.oa.thermo_microscope.detector.camera_settings.emission.start(emission_type=
+                                                                              emission_color)
+            reflection_image = self.grab_fl_live_image()
+            self.oa.thermo_microscope.detector.camera_settings.emission.stop()
+            if self.mode == 'auto':
+                reflection_image.save(os.path.join(self.oa.folder_path, f"{row}-Dataset", f"{row}_reflection_image.tif"))
             else:
-                fib_microscope, fib_settings = utils.setup_session(manufacturer=self.manufacturer)
-            return fib_microscope, fib_settings
+                reflection_image.save(os.path.join(self.manual_folder_path, f"reflection_image.tif"))
 
-        except Exception as e:
-            error_message(f"Connection to microscope failed: {e}")
-            sys.exit()
-
-    def read_from_yaml(self, file, imaging_settings_yaml=True):
-        """
-        User generated yaml file with the basic settings for imaging with the ion/electron beam.
-        """
-        def calc_constructor(loader, node):
-            value = loader.construct_scalar(node)
-            return eval(value)
-
-        def looks_like_path(s):
-            return "/" in s or "\\" in s or s.endswith(('.yaml', '.yml', '.json', '.txt')) or os.path.isabs(s)
-
-
-        if looks_like_path(file) is False:
-            path = os.path.join(self.project_root, 'modules_czii', file + '.yaml')
         else:
-            path = file
+            sim = self.fl_data_simulation()
+            image = sim()
+            tifffile.imwrite(os.path.join(self.manual_folder_path, f"reflection_image.tif"), image)
+        print('[INFO] Acquiring reflection image.')
 
-        yaml.add_constructor('!calc', calc_constructor)
-        with open(path) as file:
-            dictionary = yaml.load(file, Loader=yaml.FullLoader)
-        if isinstance(dictionary, dict) and all(not isinstance(v, dict) for v in dictionary.values()):
-            if 'scan_rotation' in dictionary:
-                dictionary['scan_rotation'] = np.deg2rad(dictionary['scan_rotation'])
-            imaging_settings = structures.ImageSettings.from_dict(dictionary)
-        elif isinstance(dictionary, dict) and all(isinstance(v, dict) for v in dictionary.values()):
-            imaging_settings = {}
-            for tool, tool_dict in dictionary.items():
-                if 'scan_rotation' in tool_dict:
-                    tool_dict['scan_rotation'] = np.deg2rad(tool_dict['scan_rotation'])
-                imaging_settings[tool] = structures.ImageSettings.from_dict(tool_dict)
+    def grab_fluorescence_image(self, add_on=None, row=None, save=True):
+        if self.mode == 'auto' and self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            self.oa.thermo_microscope.detector.camera_settings.filter.type.value = CameraFilterType.FLUORESCENCE
+            self.oa.thermo_microscope.detector.camera_settings.binning.value = self.position_data[row]['fl_settings']
+            ['binning']
+            self.oa.thermo_microscope.detector.brightness.value = self.position_data[row]['brightness']
+            self.oa.thermo_microscope.detector.camera_settings.exposure_time.value \
+                = self.position_data[row]['fl_settings']['exposure_time']
+            self.oa.thermo_microscope.detector.camera_settings.filter.type.value \
+                = self.position_data[row]['fl_settings']['filter_setting']
+            self.oa.thermo_microscope.detector.camera_settings.emission.type \
+                = self.position_data[row]['fl_settings']['emission_color']
+            self.oa.thermo_microscope.detector.camera_settings.focus.value \
+                = self.position_data[row]['fl_settings']['objective_focus']
+            image = self.oa.thermo_microscope.imaging.grab_frame(save=False)
+            image.save(os.path.join(self.oa.folder_path, f"{row}-Dataset", f"{row}_fl_image_{add_on}.tif"))
+            img = image.data
+        elif self.mode == 'manual' and self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            if self.oa.thermo_microscope.detector.camera_settings.filter.type.value == CameraFilterType.REFLECTION and hasattr(self.manual_binning):
+                pass
+            else:
+                self.manual_binning = self.oa.thermo_microscope.detector.camera_settings.binning.value
+                self.manual_brightness = self.oa.thermo_microscope.detector.brightness.value
+                self.manual_exposure_time = self.oa.thermo_microscope.detector.camera_settings.exposure_time.value
+                self.manual_filter_settings = self.oa.thermo_microscope.detector.camera_settings.filter.type.value
+                self.emission_color = self.oa.thermo_microscope.detector.camera_settings.emission.type.value
+                print(f"[INFO] The emission color is {self.emission_color}.")
+                self.manual_objective_focus =  self.oa.thermo_microscope.detector.camera_settings.focus.value
+            image = self.oa.thermo_microscope.imaging.grab_frame()
+            if save is True:
+                image.save(os.path.join(self.manual_folder_path, f"Fl_image_{add_on}.tif"))
+            img = image.data
         else:
-            raise RuntimeWarning("YAML format is not supported.")
+            sim = self.fl_data_simulation()
+            image = sim()
+            tifffile.imwrite(os.path.join(self.manual_folder_path, f"Fl_image_{add_on}.tif"), image)
+            img = image
+        print('[INFO] Acquiring fluorescence image.')
+        return img
 
-        if imaging_settings_yaml is not True:
-             return dictionary
-        else:
-             imaging_settings = structures.ImageSettings.from_dict(dictionary)
-             return imaging_settings, dictionary
-
-
-    def read_from_dict(self, filename):
-        """
-        The user should create txt files for his experiment conditions which are then converted to dicts and used
-        to set the milling/imaging conditions.
-        """
-        dictionary = {}
-        with open(os.path.join(self.folder_path , filename + '.txt'), 'r') as file:
-            for line in file:
-                if ":" in line:  # Ensure it's a key-value pair
-                    key, value = line.strip().split(":", 1)  # Split on first ":"
-                    dictionary[key.strip()] = value.strip()
-        keys_convert_to_float = ['milling_current', 'milling_voltage', 'line_integration', 'frame_integration',
-                                 'spacing',
-                                 'spot_size', 'rate', 'milling_voltage', 'dwell_time', 'hfw', 'voltage',
-                                 'working_distance', 'beam_current', 'center_x', 'center_y',
-                                 'depth', 'rotation', 'width', 'height', 'passes', 'time']
-        keys_convert_to_int = ['frame_integration', 'line_integration']
-        keys_convert_to_bool = ['autocontrast', 'autogamma', 'save', 'drift_correction', 'reduced_area',
-                                'is_exclusion'
-                                'aquire_image']
-        keys_convert_to_points = ['stigmation', 'shift']
-        str_to_bool = {"true": True, "false": False, "none": None}
-        for key in keys_convert_to_bool:
-            if key in dictionary:
-                dictionary[key] = str_to_bool.get(dictionary[key].lower(), None)
-        for key in keys_convert_to_float:
-            if key in dictionary:
-                if dictionary[key] is not None:
-                    dictionary[key] = float(dictionary[key])
-        for key in keys_convert_to_points:
-            if any(f"{key}{suffix}" in dictionary for suffix in ["X", "Y"]):
-                if key == 'Center':
-                    dictionary['Point'] = {'x': float(dictionary.pop(f"{key}X")),
-                                           'y': float(dictionary.pop(f"{key}Y"))}
-                else:
-                    dictionary[key] = {'x': float(dictionary.pop(f"{key}X")), 'y': float(dictionary.pop(f"{key}Y"))}
-        if 'resolution' in dictionary:
-            dictionary['resolution'] = ast.literal_eval(dictionary['resolution'])
-        for key in keys_convert_to_int:
-            if key in dictionary:
-                dictionary[key] = int(dictionary[key])
-        if 'scan_rotation' in dictionary:
-            dictionary['scan_rotation'] = np.deg2rad(float(dictionary['scan_rotation']))
-        return dictionary
-
-    def stage_position_within_limits(self, limit, target_position):
-        """
-        Verifies that the stage moved as expected and that the current position is reasonably close to the target
-        position.
-        limit: limit in percent
-        target_position: FibsemStagePosition
-        """
-        current_position = self.fib_microscope.get_stage_position()
-        current = [current_position.x, current_position.y, current_position.z, current_position.t, current_position.r]
-        target = [target_position.x, target_position.y, target_position.z, target_position.t, target_position.r]
-        return all(abs(cur - tar) <= abs(limit/100 * tar) for cur, tar in zip(current, target))
-
-    def import_images(self, path, fl=False):
-        img = AICSImage(path)
-        if fl:
-            image = img.data[0][1]
-        else:
-            image = img.data[0][0]
-            if np.shape(image)[0] > 1:
-                image = np.rot90(image, k=2, axes=(1, 2))
-        try:
-            xml_str = img.metadata
-            root = ET.fromstring(xml_str)
-            ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
-            pixels = root.find(".//ome:Pixels", ns)
-            pixel_z = float(pixels.attrib.get("PhysicalSizeZ"))
-            pixel_y = float(pixels.attrib.get("PhysicalSizeY"))
-            pixel_x = float(pixels.attrib.get("PhysicalSizeX"))
-        except:
+    def run_serial_acquisition_fl_images(self, update_callback, stop_event, start_timestamp, row=None, fl_settings=None,
+                                         timestamp=None):
+        print("[INFO] Serial acquisition started...")
+        self.image_queue = queue.Queue(maxsize=2000)
+        self.coin_stop_event.clear()
+        if self.oa.manufacturer != 'Demo':
+            folder_path = Path(os.path.join(self.manual_folder_path, "Images"))
+            folder_path.mkdir(parents=True, exist_ok=True)
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            self.oa.thermo_microscope.detector.camera_settings.exposure_time.value = self.manual_exposure_time
+            self.oa.thermo_microscope.detector.brightness.value = self.manual_brightness
+            self.oa.thermo_microscope.detector.camera_settings.binning.value = self.manual_binning
+            self.oa.thermo_microscope.detector.camera_settings.filter.type.value = self.manual_filter_settings
+            self.oa.thermo_microscope.imaging.start_acquisition()
+            self.oa.thermo_microscope.detector.camera_settings.emission.type.value = self.emission_color
+            
+            writer_thread = threading.Thread(target=self.image_writer, args=(folder_path, start_timestamp), daemon=True)
+            writer_thread.start()
+            i = 0
+            start_time = datetime.now()
+            emission_color = self.oa.thermo_microscope.detector.camera_settings.emission.type.value
+            self.oa.thermo_microscope.detector.camera_settings.emission.start(emission_type=
+                                                                       emission_color)
+            image = self.oa.thermo_microscope.imaging.get_image()
             try:
-                ome = img.metadata
-                pixel_z_raw = ome.images[0].pixels.physical_size_z
-                if pixel_z_raw is None:
-                    print("⚠️ physical_size_z is None — defaulting to 1.0 µm")
-                    pixel_z = 1.0
-                else:
-                    pixel_z = float(pixel_z_raw)
-                pixel_y = float(ome.images[0].pixels.physical_size_y)
-                pixel_x = float(ome.images[0].pixels.physical_size_x)
-            except:
-                try:
-                    image2 = Image.open(path)
-                    meta_dict = {TAGS[key]: image2.tag_v2[key] for key in image2.tag_v2}
-                    desc_json = json.loads(meta_dict["ImageDescription"])
-                    pixel_x = desc_json["pixel_size"]["x"]
-                    pixel_y = desc_json["pixel_size"]["y"]
-                    pixel_z = 1.0
-                except:
-                    with tifffile.TiffFile(path) as tif:
-                        image2 = tif.asarray()
-                        # Access the FEI metadata from tag 34682
-                        tag = tif.pages[0].tags.get(34682)
-                        if tag is None:
-                            raise ValueError("FEI metadata tag (34682) not found in TIFF")
+                if self.oa.thermo_microscope.imaging.state == ImagingState.ACQUIRING:
+                    while not stop_event.is_set():
+                        now = datetime.now()
+                        timestamp = (now - start_time).total_seconds() + start_timestamp
+                        new_image = self.oa.thermo_microscope.imaging.get_image()
+                        self.image_queue.put((new_image.data.copy(), i))
+                        if np.array_equal(new_image.data[:5], image.data[:5]) is False:
+                            self.image_queue.put((new_image.data.copy(), i))
+                            if update_callback:
+                                update_callback(new_image.data, timestamp)
+                            image = new_image
+                            i += 1
+                        else:
+                            continue
+            except Exception as e:
+                print(f"[ERROR] Exception occurred: {e}")
+            finally:
+                self.oa.thermo_microscope.detector.camera_settings.emission.stop()
+                self.oa.thermo_microscope.imaging.stop_acquisition()
+                self.image_queue.put(None)
+                writer_thread.join()
+        else:
+            folder_path = Path(os.path.join(self.manual_folder_path, "Images"))
+            folder_path.mkdir(parents=True, exist_ok=True)
+            
+            start_time = datetime.now()
+            writer_thread = threading.Thread(target=self.image_writer, args=(folder_path, start_timestamp), daemon=True)
+            writer_thread.start()
+            i = 0
+            sim = self.fl_data_simulation()
+            image = sim()
+            try:
+                while not stop_event.is_set():
+                    now = datetime.now()
+                    timestamp = (now - start_time).total_seconds() + start_timestamp
+                    new_image = sim()
+                    if np.array_equal(new_image[:5], image[:5]) is False:
+                        self.image_queue.put((new_image.copy(), i))
+                        if update_callback:
+                            update_callback(new_image, timestamp)
+                        image = new_image
+                        i += 1
+                    else:
+                        continue
+            except Exception as e:
+                print(f"[ERROR] Exception occurred: {e}")
+            finally:
+                self.image_queue.put(None)
+                writer_thread.join()
 
-                        # tag.value is already a dict
-                        metadata_dict = tag.value
 
-                        # Extract pixel size in nm
-                        try:
-                            pixel_z = 1.0
-                            pixel_x = metadata_dict['Scan']['PixelWidth']*1e6
-                            pixel_y = metadata_dict['Scan']['PixelHeight']*1e6
-                        except KeyError as e:
-                            raise ValueError(f"Pixel size keys not found: {e}")
+#######################################################################################################################
+#####       Functions required for the execution of the experiment
+#######################################################################################################################
 
-        return image, (pixel_z, pixel_y, pixel_x)
-
-
-    def retrieve_stage_position(self, position_name, grid_number=None):
-        """
-        Imports the stage position from the config file.
-        Available positions: sputter, gis, SEM, FIB, FL
-        """
-        dict_position_names = {'sputter': 'sputter_position',
-                               'gis': 'GIS_position',
-                                'SEM': 'SEM_topview',
-                               'FIB': 'FIB_topview',
-                               'FL': 'FL_position'
-                                }
-        self.tool = 'Hydra'
-        if self.tool == 'Hydra':
-            if grid_number is None:
-                raise RuntimeError("Please select a valid grid.")
-
+    def start_coincidence_milling(self, beam_current, stop_event, resume=False):
+        if self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(2)
+            if self.oa.thermo_microscope.beams.ion_beam.beam_current.value != beam_current:
+                self.oa.thermo_microscope.beams.ion_beam.beam_current.value = beam_current
+                time.sleep(10)
+            if resume is False:
+                self.oa.thermo_microscope.patterning.start()
+                if self.data_callback:
+                    self.data_callback('go', True)
             else:
-                stage_position = next(
-                    (d for d in self.saved_stage_positions if d.get("name") == f"grid{grid_number}_"
-                                                                               f"{dict_position_names[position_name]}"), None)
-        elif self.tool == 'Arctis':
-            stage_position = next(
-                (d for d in self.saved_stage_positions if d.get("name") == f"{dict_position_names[position_name]}"),
-                None)
+                self.oa.thermo_microscope.patterning.resume()
+            while not stop_event.is_set():
+                time.sleep(0.01)
         else:
-            raise RuntimeError("Stage positions not known for this microscope.")
-            sys.exit()
+            print("[INFO] Patterning would start now.")
 
-        if stage_position:
-            fibsem_stage_position = structures.FibsemStagePosition(x=stage_position['x'],
-                                                 y=stage_position['y'],
-                                                 z=stage_position['z'],
-                                                 r=stage_position['r'],
-                                                 t=stage_position['t'])
-            return fibsem_stage_position
+    def stop_coincidence_milling(self, pause=False):
+        if self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(2)
+            if self.pause_not_stop is False:
+                self.oa.thermo_microscope.patterning.stop()
+                #self.oa.thermo_microscope.patterning.clear_patterns()
+            else:
+                self.oa.thermo_microscope.patterning.pause()
         else:
-            print('Stage position retrieval not valid.')
+            print('[INFO] Milling stopped!')
 
-    def id_available_grids(self):
-        if self.manufacturer != 'Demo':
-            self.docked_grids = self.thermo_microscope.specimen.autoloader.get_slots(False)
-            inventory_done = False
-            for grid_slot in self.docked_grids:
-                if grid_slot.state != 'Unknown':
-                    inventory_done = True
-            if inventory_done is not True:
-                self.docked_grids = self.thermo_microscope.specimen.autoloader.get_slots(True)
-            self.thermo_microscope.autoloader.unload()
-            self.available_grids = []
-            for grid in self.docked_grids:
-                if grid.state == "Occupied":
-                    self.available_grids.append(grid)
+
+    def run_coincidence_experiment(self, callback, stop_event, start_timestamp=0.0,
+                                   test=False, row=None, beam_current=None):
+
+        def wait_and_finalize_imaging_thread():
+            self.imaging_thread.join()
+            print("[INFO] Fluorescence experiment stopped.")
+            self.stop_coincidence_milling()
+            print("[INFO] Milling stopped")
+
+        
+
+        now = datetime.now()
+        if not hasattr(self, "manual_folder_path"):
+            self.manual_folder_path = Path(
+                os.path.join(self.oa.folder_path, str(date.today()), now.strftime("%H-%M")))
+            self.manual_folder_path.mkdir(parents=True, exist_ok=True)
+            if self.data_callback:
+                self.data_callback('path', self.manual_folder_path)
+        if self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            if self.oa.thermo_microscope.detector.camera_settings.filter.type.value == CameraFilterType.REFLECTION:
+                pass
+            else:
+                self.manual_binning = self.oa.thermo_microscope.detector.camera_settings.binning.value
+                self.manual_brightness = self.oa.thermo_microscope.detector.brightness.value
+                self.manual_exposure_time = self.oa.thermo_microscope.detector.camera_settings.exposure_time.value
+                self.manual_filter_settings = self.oa.thermo_microscope.detector.camera_settings.filter.type.value
+                self.manual_emission_color = self.oa.thermo_microscope.detector.camera_settings.emission.type
+                self.manual_objective_focus = self.oa.thermo_microscope.detector.camera_settings.focus.value
+
+            if self.selected_options['FIB Milling'] is True:
+                #beam_current = self.oa.thermo_microscope.beams.ion_beam.beam_current.value
+                #self.working_distance = self.oa.thermo_microscope.beams.ion_beam.working_distance.value
+                beam_current = self.oa.fib_microscope.get_beam_current(beam_type=BeamType.ION)
+#               self.working_distance = self.oa.fib_microscope.get("working_distance", beam_type=BeamType.ION)
+
+                if self.oa.manufacturer != 'Demo':
+                    self.oa.thermo_microscope.imaging.set_active_view(2)
+                    patterns = self.oa.thermo_microscope.patterning.get_patterns()
+                    if len(patterns) == 0:
+                        print("[ERROR] Please create a milling pattern!")
+                        return
+
+                if start_timestamp == 0.0:
+                    if self.selected_options['Before/After FIB Image'] is True:
+                        self.imaging.acquire_image(hfw=self.hfw, folder_path=self.manual_folder_path,
+                                                beam_type='ion', working_distance=self.working_distance,
+                                                autofocus=False, filename=f"FIB-before-image")
+
+                    self.milling_thread = threading.Thread(target=self.start_coincidence_milling, args=(beam_current, stop_event))
+                else:
+                    resume = True
+                    self.milling_thread = threading.Thread(target=self.start_coincidence_milling,
+                                                        args=(beam_current, stop_event, resume))
+                self.oa.thermo_microscope.beams.ion_beam.beam_current.value = beam_current
+                self.milling_thread.start()
+                time.sleep(0.5)
+                print("[INFO] Starting the milling ...")
+                self.imaging_thread = threading.Thread(target=self.run_serial_acquisition_fl_images,
+                                                        args=(callback, stop_event, start_timestamp))
+                print("[INFO] Performing the fluorescence experiment ...")
+                self.imaging_thread.start()
+
+
+                wait_and_finalize_imaging_thread()
+                if self.pause_not_stop is False:
+                    self.stop_coincidence_experiment()
+            elif self.selected_options['SEM Imaging'] is True:
+                print("[INFO] Not yet implemented.")
+            
+
+    def stop_coincidence_experiment(self):
+        self.oa.thermo_microscope.patterning.clear_patterns()
+        if self.selected_options['After Z-Stack'] is True:
+            self.acquire_fl_z_stack()
+        if self.selected_options['After Reflection Image'] is True:
+            self.grab_reflection_image()
+        if self.selected_options['Before/After FIB Image'] is True:
+            self.imaging.acquire_image(hfw=self.hfw, working_distance=self.working_distance,
+                                       folder_path=self.manual_folder_path, beam_type='ion',
+                                       autofocus=False, filename=f"FIB-after-image")
+
+    def acquire_fl_z_stack(self, row=None):
+        if self.oa.manufacturer != 'Demo':
+            self.oa.thermo_microscope.imaging.set_active_view(3)
+            self.oa.thermo_microscope.imaging.set_active_device(8)
+            self.oa.thermo_microscope.detector.camera_settings.filter.type.value = CameraFilterType.FLUORESCENCE
+            self.oa.thermo_microscope.detector.camera_settings.binning.value = self.manual_binning
+            self.oa.thermo_microscope.detector.camera_settings.exposure_time.value = self.manual_exposure_time
+            self.oa.thermo_microscope.detector.brightness.value = self.manual_brightness
+            mid_focus = self.oa.thermo_microscope.detector.camera_settings.focus.value
+            z_stack = []
+            for i in range(-5, 5):
+                print("[INFO] Acquiring Z-Stack. ")
+                self.oa.thermo_microscope.detector.camera_settings.focus.value = mid_focus + (i * 250.0e-9)
+                image = self.grab_fluorescence_image(save=False)
+                if isinstance(image, np.ndarray):
+                    z_stack.append(image)
+                else:
+                    z_stack.append(image.data)
+                if self.mode == 'manual':
+                    tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
+                else:
+                    tifffile.imwrite(os.path.join(self.oa.folder_path, f"{row}-Dataset", "Z_stack_after.tif"), z_stack)
+            self.oa.thermo_microscope.detector.camera_settings.focus.value = mid_focus
         else:
-            @dataclass
-            class Grid:
-                id: int
-                state: str
-            self.available_grids = [Grid(id=1, state='Occupied'),
-                                    Grid(id=3, state='Empty'),
-                                    Grid(id=4, state='Occupied'),
-                                    Grid(id=6, state='Occupied')]
+            z_stack = []
+            for i in range(-5, 5):
+                image = (np.random.rand(512, 512) * 255).astype(np.uint8)
+                if isinstance(image, np.ndarray):
+                    z_stack.append(image)
+                else:
+                    z_stack.append(image.data)
+                if self.mode == 'manual':
+                    tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
+                else:
+                    tifffile.imwrite(os.path.join(self.oa.folder_path, f"{row}-Dataset", "Z_stack_after.tif"), z_stack)
 
-    def autoloader_control(self, new_grid_id=None):
-        if self.manufacturer != 'Demo' and self.tool == 'Arctis':
-            self.loaded_grid = None
-            docked_grids = self.thermo_microscope.specimen.autoloader.get_slots(False)
-            for docked_grid in docked_grids:
-                for grid in self.available_grids:
-                    if docked_grid.id == grid.id and docked_grid.state == 'Empty':
-                        self.loaded_grid = grid
-                        print(f"The loaded grid is {self.loaded_grid.id}")
-                        break
-            if new_grid_id is None:
-                return
-            elif new_grid_id != self.loaded_grid.id or self.loaded_grid is None:
-                self.thermo_microscope.specimen.autoloader.load(new_grid_id)
+  
 
-class OverArch(BasicFunctions):
-    def __init__(self, default_settings=False):
-        super().__init__(default_settings)
-    def set_variable(self, name, value):
-        setattr(self, name, value)
+
+
+
+
+
+
+
