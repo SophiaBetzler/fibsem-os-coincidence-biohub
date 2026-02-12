@@ -42,8 +42,9 @@ class CoincidenceGUI:
     def __init__(self, oa):
         self.oa = oa(default_settings=True)
         self.coincidence = CoincidenceFunctions(oa=self.oa)
-        self.manual_gui_window = ManualCoincidenceGUI(self.oa, self.coincidence)
+        
         self.app = QApplication(sys.argv)
+        self.manual_gui_window = ManualCoincidenceGUI(self.oa, self.coincidence)
         self.run()
 
     def run(self):
