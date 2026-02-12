@@ -38,13 +38,12 @@ sys.path.append('C:\Program Files\Enthought\Python\envs\AutoScript\Lib\site-pack
 
 
 class CoincidenceFunctions:
-    def __init__(self, oa, mode, on_experiment_stopped=None):
+    def __init__(self, oa, on_experiment_stopped=None):
         self.results = None
         self.oa = oa
         if self.oa.tool != 'Arctis':
             raise RuntimeError("This is not the right tool to run the automated tricoincidence routine.")
         self.imaging = Imaging(self.oa)
-        self.mode = mode
         self.position_data = []
         self.data_file = os.path.join(self.oa.folder_path, 'position_data.json')
         self.hfw = 120.0e-6
@@ -91,10 +90,7 @@ class CoincidenceFunctions:
                                                                               emission_color)
             reflection_image = self.grab_fl_live_image()
             self.oa.thermo_microscope.detector.camera_settings.emission.stop()
-            if self.mode == 'auto':
-                reflection_image.save(os.path.join(self.oa.folder_path, f"{row}-Dataset", f"{row}_reflection_image.tif"))
-            else:
-                reflection_image.save(os.path.join(self.manual_folder_path, f"reflection_image.tif"))
+            reflection_image.save(os.path.join(self.manual_folder_path, f"reflection_image.tif"))
 
         else:
             sim = self.fl_data_simulation()
@@ -103,25 +99,7 @@ class CoincidenceFunctions:
         print('[INFO] Acquiring reflection image.')
 
     def grab_fluorescence_image(self, add_on=None, row=None, save=True):
-        if self.mode == 'auto' and self.oa.manufacturer != 'Demo':
-            self.oa.thermo_microscope.imaging.set_active_view(3)
-            self.oa.thermo_microscope.imaging.set_active_device(8)
-            self.oa.thermo_microscope.detector.camera_settings.filter.type.value = CameraFilterType.FLUORESCENCE
-            self.oa.thermo_microscope.detector.camera_settings.binning.value = self.position_data[row]['fl_settings']
-            ['binning']
-            self.oa.thermo_microscope.detector.brightness.value = self.position_data[row]['brightness']
-            self.oa.thermo_microscope.detector.camera_settings.exposure_time.value \
-                = self.position_data[row]['fl_settings']['exposure_time']
-            self.oa.thermo_microscope.detector.camera_settings.filter.type.value \
-                = self.position_data[row]['fl_settings']['filter_setting']
-            self.oa.thermo_microscope.detector.camera_settings.emission.type \
-                = self.position_data[row]['fl_settings']['emission_color']
-            self.oa.thermo_microscope.detector.camera_settings.focus.value \
-                = self.position_data[row]['fl_settings']['objective_focus']
-            image = self.oa.thermo_microscope.imaging.grab_frame(save=False)
-            image.save(os.path.join(self.oa.folder_path, f"{row}-Dataset", f"{row}_fl_image_{add_on}.tif"))
-            img = image.data
-        elif self.mode == 'manual' and self.oa.manufacturer != 'Demo':
+        if self.oa.manufacturer != 'Demo':
             self.oa.thermo_microscope.imaging.set_active_view(3)
             self.oa.thermo_microscope.imaging.set_active_device(8)
             if self.oa.thermo_microscope.detector.camera_settings.filter.type.value == CameraFilterType.REFLECTION and hasattr(self.manual_binning):
@@ -357,10 +335,9 @@ class CoincidenceFunctions:
                     z_stack.append(image)
                 else:
                     z_stack.append(image.data)
-                if self.mode == 'manual':
-                    tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
-                else:
-                    tifffile.imwrite(os.path.join(self.oa.folder_path, f"{row}-Dataset", "Z_stack_after.tif"), z_stack)
+                
+                tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
+                
             self.oa.thermo_microscope.detector.camera_settings.focus.value = mid_focus
         else:
             z_stack = []
@@ -370,10 +347,9 @@ class CoincidenceFunctions:
                     z_stack.append(image)
                 else:
                     z_stack.append(image.data)
-                if self.mode == 'manual':
-                    tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
-                else:
-                    tifffile.imwrite(os.path.join(self.oa.folder_path, f"{row}-Dataset", "Z_stack_after.tif"), z_stack)
+
+                tifffile.imwrite(os.path.join(self.manual_folder_path, "Z_stack_after.tif"), z_stack)
+                
 
   
 
