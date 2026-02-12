@@ -215,7 +215,7 @@ class BasicFunctions:
 
 
         if looks_like_path(file) is False:
-            path = os.path.join(self.project_root, 'modules_czii', file + '.yaml')
+            path = os.path.join(self.project_root, file + '.yaml')
         else:
             path = file
 
