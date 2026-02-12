@@ -11,6 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 from collections import namedtuple, deque
 from concurrent.futures import ThreadPoolExecutor
+from Imaging import Imaging
 import re
 
 import tifffile
