@@ -31,10 +31,10 @@ import matplotlib.image as mpimg
 sys.path.append('C:\Program Files\Thermo Scientific Autoscript')
 sys.path.append('C:\Program Files\Enthought\Python\envs\AutoScript\Lib\site-packages')
 
-# from autoscript_sdb_microscope_client import SdbMicroscopeClient
-# from autoscript_sdb_microscope_client.enumerations import *
-# from autoscript_sdb_microscope_client.structures import GetImageSettings
-# from autoscript_sdb_microscope_client import SdbMicroscopeClient
+from autoscript_sdb_microscope_client import SdbMicroscopeClient
+from autoscript_sdb_microscope_client.enumerations import CameraEmissionType, CameraFilterType
+from autoscript_sdb_microscope_client.structures import GetImageSettings
+from autoscript_sdb_microscope_client import SdbMicroscopeClient
 
 
 
